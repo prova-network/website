@@ -1,9 +1,16 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 140" width="480" height="140">
-  <g fill="currentColor">
-    <circle cx="70" cy="70" r="56" fill="none" stroke="currentColor" stroke-width="10"/>
-    <path d="M52 42 L100 70 L52 98 Z" fill="currentColor"/>
-    <text x="160" y="92" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Helvetica Neue', Helvetica, Arial, sans-serif"
-          font-size="72" font-weight="500" letter-spacing="-1.4" fill="currentColor">Prova</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 200" width="600" height="200">
+  <defs>
+    <linearGradient id="provaTealWord" x1="20%" y1="0%" x2="80%" y2="100%">
+      <stop offset="0%" stop-color="#5DC3E5"/>
+      <stop offset="55%" stop-color="#2EC4B6"/>
+      <stop offset="100%" stop-color="#0F4C5C"/>
+    </linearGradient>
+  </defs>
+  <!-- Mark (centered vertically in the 200 viewBox) -->
+  <g transform="translate(0, 0)">
+    <path d="M100 16 L173 58 L173 142 L100 184 L27 142 L27 58 Z" fill="none" stroke="url(#provaTealWord)" stroke-width="9" stroke-linejoin="round" stroke-linecap="round"/>
+    <path d="M70 56 L70 144 M70 56 L116 56 Q138 56 138 80 Q138 104 116 104 L70 104" fill="none" stroke="url(#provaTealWord)" stroke-width="15" stroke-linejoin="round" stroke-linecap="round"/>
   </g>
+  <!-- Wordmark "Prova" -->
+  <text x="200" y="135" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Helvetica Neue', sans-serif" font-size="120" font-weight="500" letter-spacing="-3" fill="url(#provaTealWord)">Prova</text>
 </svg>
