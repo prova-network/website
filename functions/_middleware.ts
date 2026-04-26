@@ -92,7 +92,14 @@ function serveInstaller(req: Request): Response {
   }
 
   const wantPrerelease = url.searchParams.get('prerelease') === '1';
-  const wantVersion = url.searchParams.get('version') || (wantPrerelease ? 'prerelease' : 'latest');
+  // SECURITY (NEW-1 Critical, 2026-04-26 audit): the version string is
+  // interpolated into a shell script that the user pipes to /bin/sh.
+  // Any unvalidated query-string passes straight to the victim's shell
+  // as command substitution. The allow-list below is exhaustive: the
+  // 3 named tracks plus a strict semver-ish pattern. Anything else
+  // collapses to 'latest' — no error message, no echo.
+  const rawVersion = url.searchParams.get('version') || (wantPrerelease ? 'prerelease' : 'latest');
+  const wantVersion = sanitizeInstallerVersion(rawVersion);
 
   return new Response(installerScript(wantVersion), {
     status: 200,
@@ -104,8 +111,31 @@ function serveInstaller(req: Request): Response {
   });
 }
 
+/**
+ * Whitelist the version string that gets interpolated into the
+ * generated shell script. Anything that doesn't match a known
+ * track or a strict semver collapses to 'latest'. We never echo,
+ * 400, or otherwise reflect the bad value to the requester — the
+ * only safe behaviour is silently fall back.
+ *
+ * SECURITY: do not relax this without a fresh audit. The output is
+ * piped to /bin/sh on the victim's machine.
+ */
+function sanitizeInstallerVersion(s: string | null | undefined): string {
+  if (!s) return 'latest';
+  if (s === 'latest' || s === 'prerelease' || s === 'next') return s;
+  // semver, optional leading 'v', optional pre-release tag of [\w.-]+,
+  // capped length so we can't swallow arbitrary blobs.
+  if (s.length <= 32 && /^v?\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$/.test(s)) return s;
+  return 'latest';
+}
+
 function installerScript(version: string): string {
-  const escVer = JSON.stringify(version);
+  // Defense-in-depth: even though sanitizeInstallerVersion already
+  // limits `version` to a known-safe alphabet, we shell-quote it on
+  // the way out so any future relaxation of the regex doesn't hand
+  // arbitrary substitution to the script.
+  const escVer = shellSingleQuote(version);
   return [
     '#!/bin/sh',
     '# Prova CLI installer (https://get.prova.network)',
@@ -120,7 +150,7 @@ function installerScript(version: string): string {
     '',
     'set -eu',
     '',
-    `VERSION="\${PROVA_VERSION:-${version}}"`,
+    `VERSION="\${PROVA_VERSION:-$(printf %s ${escVer})}"`,
     'PREFIX="${PROVA_PREFIX:-$HOME/.prova}"',
     'NO_PATH="${PROVA_NO_PATH:-0}"',
     'CLI_PKG="@prova-network/cli"',
@@ -202,6 +232,22 @@ function installerScript(version: string): string {
     'echo',
     'bold "Next: prova auth"',
     '',
-    `# Installer build: ${escVer}`,
+    `# Installer build: ${version}`,
   ].join('\n');
+}
+
+/**
+ * POSIX shell single-quote a string so it survives interpolation into a
+ * shell script verbatim, with no command substitution / variable
+ * expansion / globbing performed by the eventual shell. The standard
+ * trick: wrap in single quotes, and replace any embedded single quote
+ * with the four-character sequence  '\''  which closes the current
+ * quoted span, emits a literal quote, and reopens.
+ *
+ * Used as defense-in-depth against the version-injection bug
+ * even though the regex in sanitizeInstallerVersion already
+ * forbids any of the dangerous characters.
+ */
+function shellSingleQuote(s: string): string {
+  return "'" + s.replace(/'/g, "'\\''") + "'";
 }

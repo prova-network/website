@@ -231,7 +231,17 @@ function todayUTC(): string {
 }
 
 function sanitizeFilename(name: string): string {
-  return decodeURIComponent(name).replace(/[^\w.\-]+/g, '_').slice(0, 120);
+  // decodeURIComponent throws on malformed percent-encoding (e.g. '%E0%A4%A').
+  // A bad X-Filename header would otherwise turn the upload handler
+  // into a 500-on-demand. Fall back to the raw bytes when decode fails.
+  // (NEW-8 in 2026-04-26 audits.)
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(name);
+  } catch {
+    decoded = name;
+  }
+  return decoded.replace(/[^\w.\-]+/g, '_').slice(0, 120);
 }
 
 async function readWithLimit(body: ReadableStream<Uint8Array>, limit: number): Promise<Uint8Array> {

@@ -24,6 +24,8 @@ export interface TokenEnv {
   PROVA_RATE?: KVNamespace;
   PROVA_TOKENS?: KVNamespace;
   PROVA_TOKEN_SECRET?: string;
+  /** Must be the literal string '1' to enable pk_test_ acceptance. Never enable in prod. */
+  ALLOW_TEST_TOKENS?: string;
 }
 
 const TOKEN_PREFIX = 'pk_';
@@ -98,8 +100,12 @@ export async function authenticateRequest(req: Request, env: TokenEnv): Promise<
     return { ok: false, status: 401, error: 'no_token', detail: 'Authorization: Bearer pk_live_… header required.' };
   }
 
-  // Test-mode token (used in CI / local dev when secret isn't set)
-  if (raw.startsWith('pk_test_') && !env.PROVA_TOKEN_SECRET) {
+  // Test-mode token (CI / local dev). SECURITY: Production deployments
+  // MUST NOT have ALLOW_TEST_TOKENS set. Prior behaviour accepted any
+  // pk_test_* string when PROVA_TOKEN_SECRET was missing, which turned
+  // a config outage into a fail-open auth bypass. Now the test path is
+  // gated on an explicit, separate flag. (NEW-5 in 2026-04-26 audits.)
+  if (raw.startsWith('pk_test_') && env.ALLOW_TEST_TOKENS === '1') {
     return {
       ok: true,
       payload: {
@@ -115,6 +121,7 @@ export async function authenticateRequest(req: Request, env: TokenEnv): Promise<
   }
 
   if (!env.PROVA_TOKEN_SECRET) {
+    // Fail closed. Never authenticate when the signing key isn't loaded.
     return { ok: false, status: 503, error: 'auth_offline', detail: 'Token signing key not configured.' };
   }
   const payload = await verifyToken(raw, env.PROVA_TOKEN_SECRET);

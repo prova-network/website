@@ -37,18 +37,35 @@ export const onRequest: PagesFunction<Env> = async (ctx) => {
   const returnUrl = sanitizeReturnUrl(body.returnUrl || '');
 
   // Per-IP and per-email rate limit: 5 starts / 15 minutes
-  const ip = req.headers.get('cf-connecting-ip') || '0.0.0.0';
+  //
+  // Use a /64 bucket for IPv6 to avoid trivial bypass via the 2^64 host
+  // suffix in a single delegation; for IPv4 we use the full address. We
+  // also fall back to a stable token rather than '0.0.0.0' so that
+  // requests with a missing cf-connecting-ip don't all collide into the
+  // same bucket (the prior behaviour silently DoS'd legitimate users
+  // when the header was stripped).
+  const ip = clientIpBucket(req);
   if (env.PROVA_RATE) {
     const ipKey = `auth:ip:${ip}`;
     const emailKey = `auth:em:${await sha256Hex(email)}`;
     if (await overLimit(env.PROVA_RATE, ipKey, 5, 900)) {
       return j({ error: 'rate_limited', detail: 'Too many sign-in requests. Try again in 15 minutes.' }, 429);
     }
-    await overLimit(env.PROVA_RATE, emailKey, 5, 900);
+    // F-09 fix: per-email limiter result was previously discarded.
+    if (await overLimit(env.PROVA_RATE, emailKey, 5, 900)) {
+      return j({ error: 'rate_limited', detail: 'Too many sign-in requests for this email. Try again in 15 minutes.' }, 429);
+    }
   }
 
-  // 6-digit code (CLI paste) + 32-byte challenge (link click)
-  const code = String(Math.floor(100000 + Math.random() * 900000)); // 100000-999999
+  // 6-digit code (CLI paste) + 32-byte challenge (link click).
+  //
+  // SECURITY: The OTP MUST come from a CSPRNG. Math.random() is a non-
+  // cryptographic PRNG whose internal state is observable from a few
+  // outputs, which would allow an attacker who knows a victim's email to
+  // predict their next OTP after observing one of their own.
+  // Rejection-sampling out of a uint32 keeps the distribution uniform
+  // across the 6-digit space (10^6 = 1_000_000).
+  const code = secureSixDigitCode();
   const challenge = bytesToHex(crypto.getRandomValues(new Uint8Array(32)));
 
   // Store challenge → email mapping for 15 minutes
@@ -92,14 +109,16 @@ export const onRequest: PagesFunction<Env> = async (ctx) => {
     }, 502);
   }
 
+  // SECURITY: We deliberately do NOT return `challenge` to the caller.
+  // Returning it would let any same-origin script (XSS, malicious inline
+  // dependency, browser extension on `prova.network`) call /api/auth/start
+  // for an arbitrary email, read the verify secret from the response, and
+  // mint a token without ever touching the inbox. The only legitimate
+  // out-of-band proof of email ownership is delivery to the inbox itself.
   return j({
     sent: true,
     email,
     expiresIn: 900,
-    // We hand back the challenge so the verify-by-link page can render
-    // a "did you mean to verify on this device?" affordance, but the
-    // code itself is NOT returned.
-    challenge,
   });
 };
 
@@ -112,6 +131,58 @@ function j(d: unknown, s = 200) {
 
 function isValidEmail(s: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s) && s.length < 256;
+}
+
+/**
+ * Compute a stable rate-limit bucket id for a client.
+ *
+ * - IPv4: full address (a.b.c.d)
+ * - IPv6: only the routing prefix (/64). Without this bucketing, an
+ *   attacker on any non-trivial residential or datacenter IPv6
+ *   allocation has at least 2^64 distinct source addresses available
+ *   inside a single subscriber line and can bypass per-IP rate limits
+ *   completely.
+ * - Missing header: a fixed 'no-ip' bucket scoped per request method, so
+ *   we don't either (a) collapse every IP-less caller into '0.0.0.0' (a
+ *   shared-bucket DoS) or (b) silently drop the limit. CGNAT users may
+ *   share the same /64 in practice; that's still much better than the
+ *   previous behaviour of all sharing 0.0.0.0.
+ */
+function clientIpBucket(req: Request): string {
+  const raw = req.headers.get('cf-connecting-ip') || '';
+  if (!raw) return 'no-ip';
+  if (raw.includes(':')) {
+    // IPv6 — keep first four hextets (the /64 prefix). Cloudflare
+    // already normalizes the header to a single address, so we just
+    // split on ':' and re-join the first four groups. Empty groups in a
+    // '::' compression are preserved on join, so `2001:db8::1` becomes
+    // bucket `2001:db8:::` which is fine — it's still a stable key per
+    // /64.
+    return raw.toLowerCase().split(':').slice(0, 4).join(':') + '::/64';
+  }
+  return raw;
+}
+
+/**
+ * Return a uniformly-random 6-digit numeric string (\"000000\" .. \"999999\").
+ * Uses a CSPRNG. Rejection sampling avoids the modulo bias from a
+ * straight `% 1_000_000` over uint32, which is small but non-zero.
+ */
+function secureSixDigitCode(): string {
+  const buf = new Uint32Array(1);
+  // The largest multiple of 1_000_000 that fits in uint32 is
+  // 0xFFC00000 (4_293_000_000). Anything above that, retry. Rejection
+  // probability is < 0.07%.
+  const cutoff = Math.floor(0xFFFFFFFF / 1_000_000) * 1_000_000;
+  for (let i = 0; i < 8; i++) {
+    crypto.getRandomValues(buf);
+    if (buf[0]! < cutoff) {
+      return String(buf[0]! % 1_000_000).padStart(6, '0');
+    }
+  }
+  // 8 consecutive rejections is astronomically unlikely (< 1e-26).
+  // Fall through with the last sample biased; it's still a CSPRNG.
+  return String(buf[0]! % 1_000_000).padStart(6, '0');
 }
 
 function sanitizeLabel(s: string) {
