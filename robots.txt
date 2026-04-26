@@ -1,0 +1,15 @@
+# Prova Network - https://prova.network
+# Crawlers welcome on the marketing surface; please skip the API and
+# the storage retrieval path.
+
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /p/
+Disallow: /auth/
+Disallow: /app/
+
+# Don't index the upload page (UI only, no useful content for search).
+Disallow: /upload/
+
+Sitemap: https://prova.network/sitemap.xml

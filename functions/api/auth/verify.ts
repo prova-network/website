@@ -8,6 +8,7 @@
 // from now on.
 
 import { signToken, type TokenEnv, type TokenPayload } from '../../_shared/tokens';
+import { isProvaProductionOrigin } from '../../_shared/origin';
 
 interface Env extends TokenEnv {
   PROVA_USERS?: KVNamespace;
@@ -28,9 +29,13 @@ export const onRequest: PagesFunction<Env> = async (ctx) => {
   const { request: req, env } = ctx;
   if (req.method !== 'POST') return j({ error: 'method_not_allowed' }, 405);
 
-  // Allow same-site OR no-origin (CLI calls). Browsers always send Origin.
+  // Allow same-site (production only) OR no-origin (CLI calls).
+  // Browsers always send Origin; CLIs typically don't.
+  //
+  // SECURITY (NEW-8): production-only allow-list, see start.ts for
+  // why preview deployments are excluded.
   const origin = req.headers.get('origin');
-  if (origin && !isProvaOrigin(origin)) {
+  if (origin && !isProvaProductionOrigin(origin)) {
     return j({ error: 'forbidden_origin' }, 403);
   }
 
@@ -203,12 +208,7 @@ function j(d: unknown, s = 200) {
   });
 }
 
-function isProvaOrigin(s: string) {
-  try {
-    const u = new URL(s);
-    return u.protocol === 'https:' && (u.hostname === 'prova.network' || u.hostname === 'www.prova.network' || u.hostname.endsWith('.prova-network.pages.dev'));
-  } catch { return false; }
-}
+// origin allow-list helper moved to ../../_shared/origin.ts
 
 function sanitizeLabel(s: string) {
   return s.replace(/[^\w\-. ]/g, '').slice(0, 64) || 'web';

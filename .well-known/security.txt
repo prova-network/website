@@ -1,0 +1,7 @@
+Contact: mailto:hello@prova.network
+Contact: https://github.com/prova-network/prova/security/advisories/new
+Expires: 2027-04-26T23:59:59.000Z
+Preferred-Languages: en
+Canonical: https://prova.network/.well-known/security.txt
+Policy: https://prova.network/security
+Acknowledgments: https://prova.network/security#hall-of-fame

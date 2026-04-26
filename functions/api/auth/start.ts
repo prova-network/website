@@ -10,6 +10,7 @@
 // emails so the form can show a useful error.
 
 import { sendMail, type MailEnv } from '../../_shared/email';
+import { isProvaProductionOrigin, originRoot } from '../../_shared/origin';
 
 interface Env extends MailEnv {
   PROVA_USERS?: KVNamespace;
@@ -21,10 +22,19 @@ export const onRequest: PagesFunction<Env> = async (ctx) => {
   const { request: req, env } = ctx;
   if (req.method !== 'POST') return j({ error: 'method_not_allowed' }, 405);
 
-  // Origin / Referer check — same-site only
+  // Origin / Referer check — production-only.
+  //
+  // SECURITY (NEW-8 in 2026-04-26 audit): we deliberately do NOT accept
+  // `*.prova-network.pages.dev` here. Cloudflare Pages preview
+  // deployments inherit the prod `PROVA_TOKEN_SECRET` binding, so a
+  // PR-preview running untrusted code could otherwise call this
+  // endpoint with a forged origin and mint tokens for arbitrary emails
+  // signed with the production secret. Preview branches that need to
+  // test the sign-in flow get their own deployment with a scoped
+  // secret and a scoped origin allow-list.
   const origin = req.headers.get('origin') || '';
   const refer  = req.headers.get('referer') || '';
-  const ok = isProvaOrigin(origin) || isProvaOrigin(refer);
+  const ok = isProvaProductionOrigin(origin) || isProvaProductionOrigin(refer);
   if (!ok) return j({ error: 'forbidden_origin' }, 403);
 
   let body: { email?: string; label?: string; returnUrl?: string };
@@ -196,17 +206,7 @@ function sanitizeReturnUrl(s: string) {
   return '';
 }
 
-function isProvaOrigin(s: string) {
-  if (!s) return false;
-  try {
-    const u = new URL(s);
-    return u.protocol === 'https:' && (u.hostname === 'prova.network' || u.hostname === 'www.prova.network' || u.hostname.endsWith('.prova-network.pages.dev'));
-  } catch { return false; }
-}
-
-function originRoot(s: string) {
-  try { const u = new URL(s); return `${u.protocol}//${u.host}`; } catch { return ''; }
-}
+// origin / production allow-list helpers moved to ../../_shared/origin.ts
 
 function bytesToHex(b: Uint8Array) {
   return [...b].map(x => x.toString(16).padStart(2, '0')).join('');

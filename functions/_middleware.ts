@@ -1,11 +1,34 @@
-// Prova Pages middleware. Routes by hostname and applies
-// global security headers (F-13).
+// Prova Pages middleware. Routes by hostname, applies global security
+// headers, and handles cross-origin (CORS) preflights for the public
+// API surface.
 //
-// - get.prova.network               -> install.sh (one-liner CLI installer)
-// - everywhere else                  -> falls through to static + functions,
-//                                       with CSP / HSTS / etc. layered on the response
+// - get.prova.network        -> install.sh (one-liner CLI installer)
+// - everywhere else          -> falls through to static + functions,
+//                               with CSP / HSTS / CORS / etc. layered
+//                               on the response
 
 interface Env {}
+
+// CORS allow-list. Same-origin browsers don't need this; CLIs and
+// SDKs explicitly do (so we can be hit with `Origin: null` from
+// `file://` test pages). Subdomains of prova.network are explicitly
+// excluded — if a future subdomain needs API access, list it here.
+const CORS_ALLOWED_ORIGINS = new Set<string>([
+  'https://prova.network',
+  'https://www.prova.network',
+  'https://docs.prova.network',
+  'https://spec.prova.network',
+]);
+
+// Endpoints that consumers might legitimately call cross-origin (e.g.
+// from an SDK in a third-party app). They get the wildcard treatment
+// below. Auth endpoints are deliberately NOT on this list — their
+// origin gate is enforced server-side per request and they require
+// the production origin (see _shared/origin.ts).
+const CORS_PUBLIC_API_PATHS: ReadonlyArray<RegExp> = [
+  /^\/api\/abuse\/report$/,
+  /^\/p\/[a-z0-9]+$/i,
+];
 
 export const onRequest: PagesFunction<Env> = async (ctx) => {
   const url = new URL(ctx.request.url);
@@ -15,12 +38,57 @@ export const onRequest: PagesFunction<Env> = async (ctx) => {
     return serveInstaller(ctx.request);
   }
 
+  // Handle CORS preflight before anything else — saves a downstream
+  // call and keeps the OPTIONS surface predictable.
+  if (ctx.request.method === 'OPTIONS' && url.pathname.startsWith('/api/')) {
+    return handleCorsPreflight(ctx.request, url);
+  }
+
   // Pass through to static / function handlers, then add headers
   const res = await ctx.next();
-  return withSecurityHeaders(res, url);
+  return withSecurityHeaders(res, ctx.request, url);
 };
 
-function withSecurityHeaders(res: Response, url: URL): Response {
+/**
+ * Compute the CORS Access-Control-Allow-Origin value for this request,
+ * or `null` if the request isn't from an allowed origin. We deliberately
+ * do not echo arbitrary `Origin` headers (no `*` either) because most
+ * of our endpoints are credentialed with bearer tokens.
+ */
+function allowedCorsOrigin(req: Request): string | null {
+  const origin = req.headers.get('origin');
+  if (!origin) return null;
+  if (CORS_ALLOWED_ORIGINS.has(origin)) return origin;
+  return null;
+}
+
+/**
+ * Decide if a path is a 'public API' that should accept any allowed
+ * cross-origin caller. Auth endpoints are always strict-origin (handled
+ * server-side per route).
+ */
+function isPublicApiPath(pathname: string): boolean {
+  return CORS_PUBLIC_API_PATHS.some((rx) => rx.test(pathname));
+}
+
+function handleCorsPreflight(req: Request, url: URL): Response {
+  const origin = allowedCorsOrigin(req);
+  // Even non-public-API paths get a 204 preflight, but the actual
+  // CORS-allow header is only set if origin + path are both OK.
+  const headers = new Headers({
+    'access-control-allow-methods': 'GET, HEAD, POST, OPTIONS',
+    'access-control-allow-headers': 'authorization, content-type, x-filename, x-requested-with',
+    'access-control-max-age': '86400',
+    'vary': 'Origin',
+  });
+  if (origin && isPublicApiPath(url.pathname)) {
+    headers.set('access-control-allow-origin', origin);
+    headers.set('access-control-allow-credentials', 'true');
+  }
+  return new Response(null, { status: 204, headers });
+}
+
+function withSecurityHeaders(res: Response, req: Request, url: URL): Response {
   // Don't rewrite responses that already pinned their own CSP
   // (e.g. /p/{cid} retrievals where we want default-src 'none' sandbox).
   const r = new Response(res.body, res);
@@ -29,14 +97,31 @@ function withSecurityHeaders(res: Response, url: URL): Response {
     // Allowlist:
     //   - same-origin scripts
     //   - JSDelivr for marked.js (whitepaper page)
+    //   - unpkg for three.js (Earth hero)
     //   - inline styles (we use them generously in <style> blocks)
     //   - blob: for upload progress (canvas/file readers)
     //   - https: images (for the Earth hero textures + brand assets)
     //   - api endpoints on same origin
+    //
+    // SECURITY NOTE (F-15 / NEW-5 in 2026-04-26 audit): `'unsafe-inline'`
+    // for `script-src` is still permitted here because the static site
+    // currently relies on inline `<script>` blocks for upload progress
+    // and dashboard wiring. Removing it requires either (a) extracting
+    // every inline script to a separate file (large refactor across
+    // index.html, app/*.html, upload/*.html, specs.html, lab.js inline
+    // bootstraps), or (b) injecting a per-request nonce via HTML
+    // rewriting. Both are tracked as a follow-up. The mitigations that
+    // ship in the meantime are:
+    //   - /p/{cid} now serves application/octet-stream + sandbox CSP
+    //     (NEW-7 fix), so user-uploaded HTML cannot run on this
+    //     origin.
+    //   - The auth flow no longer leaks the verify challenge into
+    //     response bodies (NEW-4 fix), so a hypothetical inline-XSS
+    //     can no longer mint tokens for arbitrary emails.
+    //   - Subdomain takeover surface from `*.pages.dev` is closed for
+    //     auth endpoints (NEW-8 fix).
     const csp = [
       "default-src 'self'",
-      // jsdelivr: marked.js for whitepaper.html
-      // unpkg:    three.js for the WebGL Earth hero
       "script-src 'self' https://cdn.jsdelivr.net https://unpkg.com 'unsafe-inline'",
       "style-src 'self' 'unsafe-inline'",
       "img-src 'self' data: blob: https:",
@@ -59,6 +144,28 @@ function withSecurityHeaders(res: Response, url: URL): Response {
   if (!r.headers.has('strict-transport-security')) r.headers.set('strict-transport-security', 'max-age=63072000; includeSubDomains; preload');
   if (!r.headers.has('cross-origin-opener-policy'))   r.headers.set('cross-origin-opener-policy', 'same-origin');
   if (!r.headers.has('cross-origin-resource-policy')) r.headers.set('cross-origin-resource-policy', 'same-site');
+
+  // CORS (F-13 fix). Apply only on /api/ paths and only when origin is
+  // in the allow-list. Same-origin browser requests don't need any of
+  // this; cross-origin requests from CLIs / SDKs / 3rd-party apps do.
+  if (url.pathname.startsWith('/api/')) {
+    const origin = allowedCorsOrigin(req);
+    if (origin && isPublicApiPath(url.pathname)) {
+      r.headers.set('access-control-allow-origin', origin);
+      r.headers.set('access-control-allow-credentials', 'true');
+      // Always set Vary: Origin when echoing the request origin, so
+      // CDN caches don't conflate responses for different origins.
+      const existingVary = r.headers.get('vary');
+      if (existingVary && !existingVary.toLowerCase().includes('origin')) {
+        r.headers.set('vary', `${existingVary}, Origin`);
+      } else if (!existingVary) {
+        r.headers.set('vary', 'Origin');
+      }
+      // Expose the prova-* headers so SDK consumers can read them
+      // from the response (otherwise the browser hides them).
+      r.headers.set('access-control-expose-headers', 'x-prova-piece-cid, x-prova-source, x-prova-verified, x-prova-prover');
+    }
+  }
 
   return r;
 }
