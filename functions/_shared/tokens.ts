@@ -7,8 +7,10 @@
 //   - Tokens are also recorded in KV under tokens:<jti> for fast revocation
 //   - Quota usage is tracked in KV under usage:<userId>:<yyyymmdd>
 //
-// For local/dev (PROVA_TOKEN_SECRET unset), we accept any token starting
+// For local/dev (ALLOW_TEST_TOKENS=='1'), we accept any token starting
 // with `pk_test_` and grant a 100 MB / day demo quota.
+
+import { isProvaProductionOrigin } from './origin';
 
 export interface TokenPayload {
   sub: string;       // user id (uuid)
@@ -90,10 +92,26 @@ export async function authenticateRequest(req: Request, env: TokenEnv): Promise<
 } | {
   ok: false; status: number; error: string; detail: string;
 }> {
-  // F-02 fix: bearer header only. The old `?token=` query fallback leaked
-  // tokens into Referer headers, server logs, browser history, and was a
-  // CSRF amplifier. We deliberately do NOT consume url.searchParams.token
-  // any more.
+  // F-02 part 2: origin gate for browser callers.
+  //
+  // CSRF defense: if the request carries an Origin header, it came from
+  // a browser, and we require the origin to be one of our trusted
+  // production hosts. Non-browser callers (CLIs, SDKs from Node) don't
+  // send Origin and aren't subject to CSRF; we accept them and rely on
+  // the bearer token alone.
+  //
+  // Why not require Origin always? Because then Node SDKs and curl
+  // scripts would have to fake one, which is a footgun. Bearer-only
+  // for non-browser is the right pragmatic line.
+  const origin = req.headers.get('origin');
+  if (origin && !isProvaProductionOrigin(origin)) {
+    return { ok: false, status: 403, error: 'forbidden_origin', detail: 'Cross-origin requests must come from a Prova production host.' };
+  }
+
+  // F-02 part 1: bearer header only. The old `?token=` query fallback
+  // leaked tokens into Referer headers, server logs, browser history,
+  // and was a CSRF amplifier. We deliberately do NOT consume
+  // url.searchParams.token any more.
   const authHeader = req.headers.get('authorization') || '';
   const raw = authHeader.replace(/^Bearer\s+/i, '').trim();
   if (!raw) {
