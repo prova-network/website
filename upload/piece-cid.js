@@ -274,7 +274,7 @@ function bytesToHex(bytes) {
  * Encode a 32-byte CommP digest as a CIDv1 string.
  * Multibase: base32 lowercase no-padding ("b" prefix).
  * Codec:     0xf101 (fil-commitment-unsealed) — varint encoding 0x81 0xe2 0x03
- * Multihash: 0x1012 (sha2-256-trunc254-padded) — varint 0x91 0x20
+ * Multihash: 0x1012 (sha2-256-trunc254-padded) — varint 0x92 0x20
  *            0x20 length, 32 bytes digest
  *
  * Resulting binary CID is then multibase-encoded.
@@ -287,8 +287,20 @@ function encodeFilCommP(digest32) {
   const version = [0x01];
   // 0xf101 codec → varint encoding = 0x81 0xe2 0x03
   const codec = [0x81, 0xe2, 0x03];
-  // 0x1012 hash function → varint encoding = 0x91 0x20
-  const hashFn = [0x91, 0x20];
+  // 0x1012 hash function → varint encoding = 0x92 0x20
+  //
+  // BUG FIX 2026-04-26: previous code emitted (0x91 0x20) which decodes
+  // as varint 0x1011 (sha2-256-trunc254-padded-binary-tree-multilayer,
+  // a deprecated CommD aggregation hash) instead of 0x1012
+  // (sha2-256-trunc254-padded, the canonical CommP / piece-CID hash).
+  // The 32-byte commitment digest payload was correct, but the CID's
+  // multihash function pointer was off by one bit, producing piece-CIDs
+  // that started with `baga6ea4r…` instead of the canonical
+  // `baga6ea4s…`. Cross-validated against the FilOzone Go canonical
+  // implementation — with this fix, identical input bytes now produce
+  // byte-identical piece-CIDs across the browser upload page, the Node
+  // CLI, and the canonical Go reference.
+  const hashFn = [0x92, 0x20];
   const len = [0x20];
 
   const cidBytes = new Uint8Array(version.length + codec.length + hashFn.length + len.length + 32);
